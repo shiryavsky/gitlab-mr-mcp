@@ -1,24 +1,18 @@
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/kopfrechner-gitlab-mr-mcp-badge.png)](https://mseep.ai/app/kopfrechner-gitlab-mr-mcp)
-
-[![GitHub stars](https://img.shields.io/github/stars/kopfrechner/gitlab-mr-mcp?style=flat)](https://github.com/kopfrechner/gitlab-mr-mcp/stargazers)
-[![License](https://img.shields.io/github/license/kopfrechner/gitlab-mr-mcp)](LICENSE)
-[![smithery badge](https://smithery.ai/badge/@kopfrechner/gitlab-mr-mcp)](https://smithery.ai/server/@kopfrechner/gitlab-mr-mcp)
-
 # 🚀 GitLab MR MCP
 
-A Model Context Protocol (MCP) server for interacting with GitLab merge requests and issues.
+A Model Context Protocol (MCP) server for interacting with GitLab merge requests, issues, CI/CD pipelines, and code quality reports.
 
 ## 📌 Overview
 
 This project implements a server using the Model Context Protocol (MCP) that allows AI agents to interact with GitLab repositories. It provides tools for:
 
 - Listing available GitLab projects
-- Fetching merge request details and comments
-- Getting merge request diffs
-- Adding comments to merge requests
-- Adding line-specific comments to code in merge request diffs
+- Fetching merge request details, comments, and diffs
+- Adding comments and replying to discussion threads
 - Fetching issue details
 - Setting merge request title and description
+- Inspecting CI/CD pipeline jobs and artifacts
+- Retrieving code quality reports and test summaries
 
 ## 📦 Installation
 
@@ -48,6 +42,7 @@ npm install
 ```
 
 3. Add the following to your MCP client configuration:
+
 ```json
 {
   "mcpServers": {
@@ -63,37 +58,111 @@ npm install
 }
 ```
 
+## 🔌 Hermes Agent Configuration
+
+To use this MCP server with [Hermes Agent](https://github.com/nousresearch/hermes-agent), add it to your `config.yaml` under `mcp_servers`:
+
+```yaml
+mcp_servers:
+  gitlab_mr_mcp:
+    command: node
+    args:
+      - /path/to/gitlab-mr-mcp/index.js
+    env:
+      MR_MCP_GITLAB_TOKEN: "glpat-your-gitlab-token"
+      MR_MCP_GITLAB_HOST: "gitlab.yourcompany.com"
+```
+
+After adding the config, restart Hermes or reload tools:
+
+```bash
+hermes tools
+```
+
+The server will expose 15 tools automatically. Here's an example workflow:
+
+```
+# Find open MRs in a project
+→ get_projects → list_open_merge_requests(project_id: 42)
+
+# Review an MR with code quality
+→ get_merge_request_details(42, 7)
+→ get_code_quality_report(42, 7)
+→ get_test_report(42, 7)
+
+# Reply to a reviewer comment
+→ get_merge_request_comments(42, 7, verbose: true)  # get discussion_id
+→ reply_to_merge_request_discussion(42, 7, discussion_id, "Fixed, thanks!")
+```
+
+**Environment variables for filtering:**
+
+```yaml
+    env:
+      MR_MCP_GITLAB_TOKEN: "glpat-your-token"
+      MR_MCP_GITLAB_HOST: "gitlab.yourcompany.com"
+      MR_MCP_MIN_ACCESS_LEVEL: "30"        # optional: filter by access level
+      MR_MCP_PROJECT_SEARCH_TERM: "my-"    # optional: filter projects by name
+```
+
 ## 🛠️ Available Tools
 
-* `get_projects`
+### Projects & Merge Requests
+
+- `get_projects`
   Gets a list of GitLab projects accessible with your token.
 
-* `list_open_merge_requests`
+- `list_open_merge_requests`
   Lists all open merge requests in the specified project.
 
-* `get_merge_request_details`
-  Gets detailed information about a specific merge request.
+- `get_merge_request_details`
+  Gets detailed information about a specific merge request (title, branches, URL, pipeline status).
 
-* `get_merge_request_comments`
-  Gets comments from a specific merge request, including discussion notes and diff notes.
+- `get_merge_request_comments`
+  Gets comments from a specific merge request, including discussion notes and diff notes. Returns `discussion_id` for each comment, usable with `reply_to_merge_request_discussion`.
 
-* `add_merge_request_comment`
+- `get_merge_request_diff`
+  Gets the file diffs for a merge request.
+
+### Comments & Discussions
+
+- `add_merge_request_comment`
   Adds a general comment to a merge request.
 
-* `add_merge_request_diff_comment`
-  Adds a comment to a specific line in a file within a merge request.
+- `reply_to_merge_request_discussion`
+  Replies to an existing discussion thread on a merge request. Use this to answer reviewer/bot comments in their specific thread. The `discussion_id` is obtained from `get_merge_request_comments` (verbose=true).
 
-* `get_merge_request_diff`
-  Gets the diff for a merge request.
+- `add_merge_request_diff_comment`
+  Adds a comment to a specific line in a file within a merge request diff.
 
-* `get_issue_details`
+### Merge Request Metadata
+
+- `set_merge_request_title`
+  Sets the title of a merge request.
+
+- `set_merge_request_description`
+  Sets the description of a merge request.
+
+### Issues
+
+- `get_issue_details`
   Gets detailed information about a specific issue.
 
-* `set_merge_request_title`
-  Set the title of a merge request
+### CI/CD Pipelines & Jobs
 
-* `set_merge_request_description`
-  Set the description of a merge request
+- `get_pipeline_jobs`
+  Gets the CI/CD jobs for a specific pipeline. Useful for finding jobs that produce reports (e.g., golangci-lint, code-quality).
+
+- `get_job_details`
+  Gets details of a specific CI/CD job including its artifacts. Look for artifacts with `file_type: "codequality"` or `file_type: "junit"`.
+
+### Code Quality & Test Reports
+
+- `get_code_quality_report`
+  Gets the Code Quality report for a merge request. Finds the latest pipeline, locates the job with a codequality artifact, and returns a structured summary grouped by severity, check type, and file.
+
+- `get_test_report`
+  Gets the test summary report for a merge request. Finds the latest pipeline, locates the job with junit test artifacts, downloads the junit-report.xml, and returns a structured summary: total tests, failures, errors, skipped, time, and details of each failure with stack trace.
 
 ## 🏗️ Development
 
@@ -122,9 +191,15 @@ npx -y @modelcontextprotocol/inspector npm start
 
 If you encounter permissions issues (403 Forbidden), check:
 
-1. Your GitLab token has the proper scopes (api, read_api)
+1. Your GitLab token has the proper scopes (`api`, `read_api`)
 2. The token user has proper access to the projects
 3. The project IDs are correct
+
+For `get_code_quality_report` or `get_test_report` returning no data:
+
+1. Make sure the MR has a completed pipeline
+2. Check that the pipeline has a job with `codequality` or `junit` artifacts
+3. Use `get_pipeline_jobs` → `get_job_details` to inspect available artifacts manually
 
 ## 📜 License
 
@@ -133,4 +208,3 @@ If you encounter permissions issues (403 Forbidden), check:
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
