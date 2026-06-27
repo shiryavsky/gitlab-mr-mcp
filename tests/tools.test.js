@@ -17,9 +17,17 @@ const mockGitlabInstance = {
     MergeRequestDiscussions: {
         all: jest.fn(),
         create: jest.fn(),
+        addNote: jest.fn(),
     },
     Issues: {
         show: jest.fn(),
+    },
+    Jobs: {
+        all: jest.fn(),
+        show: jest.fn(),
+    },
+    JobArtifacts: {
+        downloadArchive: jest.fn(),
     },
 };
 
@@ -220,6 +228,205 @@ describe('GitLab MR MCP Tools', () => {
 
             expect(result.isError).toBe(true);
             expect(result.content[0].text).toContain('Error: API Error');
+        });
+    });
+
+    describe('get_pipeline_jobs', () => {
+        it('should return pipeline jobs', async () => {
+            const mockJobs = [
+                { id: 1, name: 'go-test', status: 'success', stage: 'test', allow_failure: false },
+                { id: 2, name: 'golangci-lint', status: 'failed', stage: 'test', allow_failure: false },
+            ];
+            mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+
+            const handler = getToolHandler('get_pipeline_jobs');
+            const result = await handler({ project_id: 123, pipeline_id: 456 });
+
+            expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(123, { pipelineId: 456 });
+            const content = JSON.parse(result.content[0].text);
+            expect(content).toHaveLength(2);
+            expect(content[0].name).toBe('go-test');
+        });
+    });
+
+    describe('get_job_details', () => {
+        it('should return job details with artifacts', async () => {
+            const mockJob = {
+                id: 1,
+                name: 'golangci-lint',
+                status: 'success',
+                stage: 'test',
+                pipeline_id: 456,
+                artifacts: [
+                    { file_type: 'codequality', filename: 'gl-code-quality-report.json' },
+                    { file_type: 'trace', filename: 'job.log' },
+                ],
+            };
+            mockGitlabInstance.Jobs.show.mockResolvedValue(mockJob);
+
+            const handler = getToolHandler('get_job_details');
+            const result = await handler({ project_id: 123, job_id: 1 });
+
+            expect(mockGitlabInstance.Jobs.show).toHaveBeenCalledWith(123, 1);
+            const content = JSON.parse(result.content[0].text);
+            expect(content.name).toBe('golangci-lint');
+            expect(content.artifacts).toHaveLength(2);
+        });
+    });
+
+    describe('get_code_quality_report', () => {
+        it('should return code quality report summary', async () => {
+            const mockMr = {
+                head_pipeline: { id: 456 },
+            };
+            const mockJobs = [
+                { id: 1, name: 'go-test', status: 'success' },
+                { id: 2, name: 'golangci-lint', status: 'success' },
+            ];
+            const mockJobWithCQ = {
+                id: 2,
+                name: 'golangci-lint',
+                artifacts: [
+                    { file_type: 'codequality', filename: 'gl-code-quality-report.json' },
+                ],
+            };
+            const mockReport = JSON.stringify([
+                { description: 'test issue', check_name: 'gosec', severity: 'blocker', location: { path: 'file.go', lines: { begin: 10 } } },
+                { description: 'minor issue', check_name: 'unused', severity: 'minor', location: { path: 'file.go', lines: { begin: 20 } } },
+            ]);
+
+            mockGitlabInstance.MergeRequests.show.mockResolvedValue(mockMr);
+            mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+            mockGitlabInstance.Jobs.show
+                .mockResolvedValueOnce({ artifacts: [] }) // go-test - no codequality
+                .mockResolvedValueOnce(mockJobWithCQ); // golangci-lint - has codequality
+            mockGitlabInstance.JobArtifacts.downloadArchive.mockResolvedValue(mockReport);
+
+            const handler = getToolHandler('get_code_quality_report');
+            const result = await handler({ project_id: 123, merge_request_iid: 1 });
+
+            expect(mockGitlabInstance.JobArtifacts.downloadArchive).toHaveBeenCalledWith(123, {
+                jobId: 2,
+                artifactPath: 'gl-code-quality-report.json',
+            });
+            expect(result.content[0].text).toContain('Total issues: 2');
+            expect(result.content[0].text).toContain('blocker: 1');
+            expect(result.content[0].text).toContain('minor: 1');
+        });
+
+        it('should return error when no pipeline exists', async () => {
+            mockGitlabInstance.MergeRequests.show.mockResolvedValue({});
+
+            const handler = getToolHandler('get_code_quality_report');
+            const result = await handler({ project_id: 123, merge_request_iid: 1 });
+
+            expect(result.content[0].text).toContain('No pipeline found');
+        });
+
+        it('should return error when no codequality artifact found', async () => {
+            const mockMr = { head_pipeline: { id: 456 } };
+            const mockJobs = [{ id: 1, name: 'go-test', status: 'success' }];
+
+            mockGitlabInstance.MergeRequests.show.mockResolvedValue(mockMr);
+            mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+            mockGitlabInstance.Jobs.show.mockResolvedValue({ artifacts: [] });
+
+            const handler = getToolHandler('get_code_quality_report');
+            const result = await handler({ project_id: 123, merge_request_iid: 1 });
+
+            expect(result.content[0].text).toContain('No job with codequality artifact found');
+        });
+    });
+
+    describe('get_test_report', () => {
+        it('should return test report summary', async () => {
+            const mockMr = {
+                head_pipeline: { id: 456 },
+            };
+            const mockJobs = [
+                { id: 1, name: 'golangci-lint', status: 'success' },
+                { id: 2, name: 'go-test', status: 'failed' },
+            ];
+            const mockJobWithJunit = {
+                id: 2,
+                name: 'go-test',
+                artifacts: [
+                    { file_type: 'junit', filename: 'junit.xml.gz' },
+                    { file_type: 'trace', filename: 'job.log' },
+                ],
+            };
+
+            // Create a minimal zip with junit-report.xml
+            const junitXml = `<?xml version="1.0"?>
+<testsuites tests="100" failures="2" errors="0" time="45.5">
+  <testsuite tests="10" failures="1" errors="0" time="5.0" name="pkg/a">
+    <testcase name="TestGood" classname="pkg/a"/>
+    <testcase name="TestBad" classname="pkg/a">
+      <failure message="expected 1 got 2">TestBad failed</failure>
+    </testcase>
+  </testsuite>
+  <testsuite tests="90" failures="1" errors="0" time="40.5" name="pkg/b">
+    <testcase name="TestAlsoBad" classname="pkg/b">
+      <failure message="panic">panic: nil pointer</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+            // Minimal zip: PK header + stored entry
+            const zipBuffer = Buffer.alloc(30 + 4 + 16 + junitXml.length);
+            const sig = 0x04034b50;
+            zipBuffer.writeUInt32LE(sig, 0);
+            zipBuffer.writeUInt16LE(20, 4); // version
+            zipBuffer.writeUInt16LE(0, 8);  // method = stored
+            zipBuffer.writeUInt16LE(16, 26); // name length
+            zipBuffer.writeUInt16LE(0, 28);  // extra length
+            zipBuffer.writeUInt32LE(junitXml.length, 30); // comp size
+            zipBuffer.writeUInt32LE(junitXml.length, 34); // uncomp size
+            zipBuffer.write('junit-report.xml', 34, 'utf8');
+            zipBuffer.write(junitXml, 34 + 16, 'utf8');
+
+            mockGitlabInstance.MergeRequests.show.mockResolvedValue(mockMr);
+            mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+            mockGitlabInstance.Jobs.show
+                .mockResolvedValueOnce({ artifacts: [] }) // golangci-lint - no junit
+                .mockResolvedValueOnce(mockJobWithJunit); // go-test - has junit
+            mockGitlabInstance.JobArtifacts.downloadArchive.mockResolvedValue(zipBuffer);
+
+            const handler = getToolHandler('get_test_report');
+            const result = await handler({ project_id: 123, merge_request_iid: 1 });
+
+            expect(mockGitlabInstance.JobArtifacts.downloadArchive).toHaveBeenCalledWith(123, {
+                jobId: 2,
+            });
+            expect(result.content[0].text).toContain('Total: tests=100');
+            expect(result.content[0].text).toContain('failures=2');
+            expect(result.content[0].text).toContain('pkg/a');
+            expect(result.content[0].text).toContain('pkg/b');
+        });
+
+        it('should return error when no pipeline exists', async () => {
+            mockGitlabInstance.MergeRequests.show.mockResolvedValue({});
+
+            const handler = getToolHandler('get_test_report');
+            const result = await handler({ project_id: 123, merge_request_iid: 1 });
+
+            expect(result.content[0].text).toContain('No pipeline found');
+        });
+
+        it('should return error when no junit artifact found', async () => {
+            const mockMr = { head_pipeline: { id: 456 } };
+            const mockJobs = [{ id: 1, name: 'lint', status: 'success' }];
+
+            mockGitlabInstance.MergeRequests.show.mockResolvedValue(mockMr);
+            mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+            mockGitlabInstance.Jobs.show.mockResolvedValue({
+                artifacts: [{ file_type: 'codequality', filename: 'report.json' }],
+            });
+
+            const handler = getToolHandler('get_test_report');
+            const result = await handler({ project_id: 123, merge_request_iid: 1 });
+
+            expect(result.content[0].text).toContain('No job with junit test artifact found');
         });
     });
 });
